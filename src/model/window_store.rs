@@ -558,11 +558,35 @@ impl WindowStore {
     }
 
     /// A current successful AX omission is destructive only with native negative evidence.
+    #[cfg(test)]
     pub(crate) fn reconcile_app_inventory(
         &mut self,
         pid: i32,
         observed: &[WindowId],
         inactive: &HashSet<WindowId>,
+        observe: impl FnMut(WindowServerId, Option<WindowServerInfo>) -> InventoryWindowObservation,
+    ) -> Vec<(WindowId, Option<WindowServerId>)> {
+        self.reconcile_app_inventory_with_visible(
+            pid,
+            observed,
+            inactive,
+            &HashSet::default(),
+            observe,
+        )
+    }
+
+    /// `visible` holds this app's windows on an active workspace of an active
+    /// Space that are not entering or in native fullscreen. Some apps close a
+    /// window by ordering it out and keeping it for reuse (Slack, Spotify,
+    /// Notion), so no AXUIElementDestroyed arrives. For a visible window, AX
+    /// omission plus WindowServer ordering out is that close. Elsewhere it can
+    /// be parking or a Space transition, so those windows keep their identity.
+    pub(crate) fn reconcile_app_inventory_with_visible(
+        &mut self,
+        pid: i32,
+        observed: &[WindowId],
+        inactive: &HashSet<WindowId>,
+        visible: &HashSet<WindowId>,
         mut observe: impl FnMut(WindowServerId, Option<WindowServerInfo>) -> InventoryWindowObservation,
     ) -> Vec<(WindowId, Option<WindowServerId>)> {
         let observed: HashSet<_> = observed.iter().copied().collect();
@@ -582,6 +606,7 @@ impl WindowStore {
                 if observation.suitable == Some(true)
                     && observation.ordered_in == Some(false)
                     && !record.ax_invalidated
+                    && !visible.contains(&wid)
                 {
                     // AX omission can be caused by native ordering. After AX
                     // invalidation, omission plus ordering out confirms retirement;

@@ -4484,7 +4484,7 @@ impl Reactor {
         }) {
             self.request_space_snapshot();
         }
-        let inactive_windows = self
+        let inactive_windows: HashSet<WindowId> = self
             .state
             .windows
             .window_ids_for_pid(pid)
@@ -4508,6 +4508,33 @@ impl Reactor {
         observed.extend(new.iter().filter_map(|(_, info)| {
             info.sys_id.and_then(|wsid| self.state.windows.tracked_window_id(wsid))
         }));
+        // Windows on the visible workspace that AX omitted. Native fullscreen
+        // entry also orders a window out of its user Space, so a window with a
+        // fullscreen record or Space membership keeps its slot.
+        let observed_ids: HashSet<WindowId> = observed.iter().copied().collect();
+        let visible_windows: HashSet<WindowId> = self
+            .state
+            .windows
+            .window_ids_for_pid(pid)
+            .filter(|wid| !observed_ids.contains(wid) && !inactive_windows.contains(wid))
+            .filter(|wid| {
+                let Some(wsid) =
+                    self.state.windows.record(*wid).and_then(|record| record.window_server_id())
+                else {
+                    return false;
+                };
+                self.state.windows.native_fullscreen_record_for_window(*wid).is_none()
+                    && self
+                        .state
+                        .windows
+                        .pending_native_fullscreen_record_for_window_server_id(wsid)
+                        .is_none()
+                    && !window_server::window_spaces(wsid).into_iter().any(|space| {
+                        self.is_fullscreen_space(space)
+                            || window_server::space_is_fullscreen(space.get())
+                    })
+            })
+            .collect();
         let retired = if matches!(
             self.refocus_manager.stale_cleanup_state,
             StaleCleanupState::Suppressed
@@ -4516,10 +4543,11 @@ impl Reactor {
         {
             Vec::new()
         } else {
-            self.state.windows.reconcile_app_inventory(
+            self.state.windows.reconcile_app_inventory_with_visible(
                 pid,
                 &observed,
                 &inactive_windows,
+                &visible_windows,
                 |wsid, cached_info| crate::model::window_store::InventoryWindowObservation {
                     info: cached_info.or_else(|| window_server::get_window(wsid)),
                     suitable: window_server::app_window_suitability(wsid),

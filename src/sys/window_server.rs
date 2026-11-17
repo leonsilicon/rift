@@ -45,6 +45,7 @@ thread_local! {
     static TEST_WINDOW_ORDER_QUERY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_WINDOW_SPACES_OVERRIDE: RefCell<HashMap<u32, Vec<u64>>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_ORDERED_IN_OVERRIDE: RefCell<HashMap<u32, bool>> = RefCell::new(HashMap::default());
+    static TEST_WINDOW_SUITABILITY_OVERRIDE: RefCell<HashMap<u32, bool>> = RefCell::new(HashMap::default());
     static TEST_CURSOR_LOCATION_OVERRIDE: std::cell::Cell<Option<CGPoint>> = const { std::cell::Cell::new(None) };
 }
 
@@ -1000,7 +1001,26 @@ pub fn set_window_ordered_in_override(id: WindowServerId, ordered: Option<bool>)
     });
 }
 
+#[cfg(test)]
+pub fn set_window_suitability_override(id: WindowServerId, suitable: Option<bool>) {
+    TEST_WINDOW_SUITABILITY_OVERRIDE.with(|override_suitable| {
+        let mut override_suitable = override_suitable.borrow_mut();
+        if let Some(suitable) = suitable {
+            override_suitable.insert(id.as_u32(), suitable);
+        } else {
+            override_suitable.remove(&id.as_u32());
+        }
+    });
+}
+
 pub fn app_window_suitability(id: WindowServerId) -> Option<bool> {
+    #[cfg(test)]
+    if let Some(suitable) = TEST_WINDOW_SUITABILITY_OVERRIDE
+        .with(|override_suitable| override_suitable.borrow().get(&id.as_u32()).copied())
+    {
+        return Some(suitable);
+    }
+
     let query = WindowIterator::new(&[id])?;
 
     if query.count() > 0 && query.advance().is_some() {

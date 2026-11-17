@@ -6945,6 +6945,66 @@ fn empty_inventory_retires_last_ordered_out_window_without_cached_visibility() {
 }
 
 #[test]
+fn empty_inventory_retires_window_an_app_hides_on_close() {
+    // Slack, Spotify and Notion close a window by ordering it out and keep it
+    // for reuse. It stays a suitable app window and AX sends no destroy.
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let closed = WindowId::new(1, 1);
+    let open = WindowId::new(1, 2);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    let wsid = reactor.test_window_server_id(closed);
+    assert!(has_window_in_layout(&mut reactor, space, screen, closed));
+
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+    crate::sys::window_server::set_window_suitability_override(wsid, Some(true));
+    reactor.handle_event(Event::WindowServerHidden(wsid));
+    reactor.discover_test_windows(closed.pid, vec![], vec![open]);
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+    crate::sys::window_server::set_window_suitability_override(wsid, None);
+
+    assert!(reactor.state.windows.record(closed).is_none());
+    assert!(!has_window_in_layout(&mut reactor, space, screen, closed));
+    assert!(has_window_in_layout(&mut reactor, space, screen, open));
+}
+
+#[test]
+fn empty_inventory_keeps_ordered_out_windows_off_the_visible_workspace() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let parked = WindowId::new(1, 1);
+    let fullscreen = WindowId::new(1, 2);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    let secondary = reactor.test_workspace_ids(space)[1];
+    assert!(reactor.assign_test_window_to_workspace(space, parked, secondary));
+    let parked_wsid = reactor.test_window_server_id(parked);
+    let fullscreen_wsid = reactor.test_window_server_id(fullscreen);
+
+    // Fullscreen entry orders the window out of its user Space first.
+    let fullscreen_space = SpaceId::new(2);
+    reactor.space_state.fullscreen_spaces.insert(fullscreen_space);
+    crate::sys::window_server::set_window_spaces_override(
+        fullscreen_wsid,
+        Some(vec![space.get(), fullscreen_space.get()]),
+    );
+    for wsid in [parked_wsid, fullscreen_wsid] {
+        crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+        crate::sys::window_server::set_window_suitability_override(wsid, Some(true));
+    }
+    reactor.discover_test_windows(parked.pid, vec![], vec![]);
+    for wsid in [parked_wsid, fullscreen_wsid] {
+        crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+        crate::sys::window_server::set_window_suitability_override(wsid, None);
+    }
+    crate::sys::window_server::set_window_spaces_override(fullscreen_wsid, None);
+
+    assert_eq!(reactor.test_workspace_for_window(space, parked), Some(secondary));
+    assert!(reactor.state.windows.record(fullscreen).is_some());
+}
+
+#[test]
 fn empty_inventory_keeps_window_parked_on_inactive_workspace() {
     let (mut apps, mut reactor) = test_context_with_workspace_count(2);
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
