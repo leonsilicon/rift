@@ -1473,45 +1473,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         if !self.window_participates(a) || !self.window_participates(b) {
             return false;
         }
-        let node_a = match self.tree.data.window.node_for(layout, a) {
-            Some(n) => n,
-            None => return false,
-        };
-        let node_b = match self.tree.data.window.node_for(layout, b) {
-            Some(n) => n,
-            None => return false,
-        };
-
-        if node_a == node_b {
-            return false;
-        }
-
-        let selection = self.selection(layout);
-        // Exchange the occupants of the slots without restructuring the tree.
-        // Reparenting a leaf can collapse a single-child container mid-swap.
-        let index = &mut self.tree.data.window;
-        index.windows.insert(node_a, b);
-        index.windows.insert(node_b, a);
-        for (wid, from, to) in [(a, node_a, node_b), (b, node_b, node_a)] {
-            let info = index
-                .window_nodes
-                .get_mut(&wid)
-                .unwrap()
-                .0
-                .iter_mut()
-                .find(|info| info.layout == layout && info.node == from)
-                .unwrap();
-            info.node = to;
-        }
-        self.select(if selection == node_a {
-            node_b
-        } else if selection == node_b {
-            node_a
-        } else {
-            selection
-        });
-
-        true
+        self.swap_window_slots(layout, a, b)
     }
 
     fn apply_target_drop(
@@ -1917,7 +1879,7 @@ impl TraditionalLayoutSystem {
         }
     }
 
-    fn rebalance_node(&mut self, node: NodeId) {
+    pub(crate) fn rebalance_node(&mut self, node: NodeId) {
         let map = &self.tree.map;
         let children: Vec<_> = node.children(map).collect();
         let count = children.len() as f32;
@@ -1931,6 +1893,50 @@ impl TraditionalLayoutSystem {
         for child in children {
             self.rebalance_node(child);
         }
+    }
+
+    /// Exchange two windows' slots even when either is suspended. Callers that
+    /// act for the user go through `swap_windows`, which refuses suspended ones.
+    pub(crate) fn swap_window_slots(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
+        let node_a = match self.tree.data.window.node_for(layout, a) {
+            Some(n) => n,
+            None => return false,
+        };
+        let node_b = match self.tree.data.window.node_for(layout, b) {
+            Some(n) => n,
+            None => return false,
+        };
+
+        if node_a == node_b {
+            return false;
+        }
+
+        let selection = self.selection(layout);
+        // Exchange the occupants of the slots without restructuring the tree.
+        // Reparenting a leaf can collapse a single-child container mid-swap.
+        let index = &mut self.tree.data.window;
+        index.windows.insert(node_a, b);
+        index.windows.insert(node_b, a);
+        for (wid, from, to) in [(a, node_a, node_b), (b, node_b, node_a)] {
+            let info = index
+                .window_nodes
+                .get_mut(&wid)
+                .unwrap()
+                .0
+                .iter_mut()
+                .find(|info| info.layout == layout && info.node == from)
+                .unwrap();
+            info.node = to;
+        }
+        self.select(if selection == node_a {
+            node_b
+        } else if selection == node_b {
+            node_a
+        } else {
+            selection
+        });
+
+        true
     }
 
     pub(crate) fn select(&mut self, selection: NodeId) {

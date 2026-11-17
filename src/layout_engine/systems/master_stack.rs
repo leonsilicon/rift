@@ -345,6 +345,60 @@ impl MasterStackLayoutSystem {
                 }
             }
         }
+
+        self.promote_visible_over_suspended(layout, master, stack);
+    }
+
+    /// Whether a suspended window sits in the master area while a visible one
+    /// waits in the stack. Reads the tree as is, since a single-window area can
+    /// be a bare window node rather than a container.
+    fn suspended_window_holds_master(&self, layout: LayoutId) -> bool {
+        let root = self.inner.root(layout);
+        let children: Vec<_> = root.children(self.inner.map()).collect();
+        if children.len() != 2 {
+            return false;
+        }
+        let (master, stack) = if self.master_first() {
+            (children[0], children[1])
+        } else {
+            (children[1], children[0])
+        };
+        let area = |node: NodeId| match self.inner.window_at(node) {
+            Some(wid) => vec![wid],
+            None => self.windows_in_container(node),
+        };
+        area(master).into_iter().any(|wid| !self.inner.window_participates(wid))
+            && area(stack).into_iter().any(|wid| self.inner.window_participates(wid))
+    }
+
+    /// A minimized window, or one whose app is hidden, keeps its slot but takes
+    /// no space. In the master area that leaves the master empty while every
+    /// visible window piles into the stack, so give each such master slot to the
+    /// nearest visible stack window. The suspended window takes that window's
+    /// stack slot and comes back there.
+    fn promote_visible_over_suspended(&mut self, layout: LayoutId, master: NodeId, stack: NodeId) {
+        if !self.inner.map().contains(master) || !self.inner.map().contains(stack) {
+            return;
+        }
+        let suspended: Vec<_> = self
+            .windows_in_container(master)
+            .into_iter()
+            .filter(|&wid| !self.inner.window_participates(wid))
+            .collect();
+        if suspended.is_empty() {
+            return;
+        }
+        let mut visible: Vec<_> = self
+            .windows_in_container(stack)
+            .into_iter()
+            .filter(|&wid| self.inner.window_participates(wid))
+            .collect();
+        if !self.master_first() {
+            visible.reverse();
+        }
+        for (hidden, shown) in suspended.into_iter().zip(visible) {
+            self.inner.swap_window_slots(layout, hidden, shown);
+        }
     }
 
     fn move_window_to_container(
@@ -550,7 +604,24 @@ impl MasterStackLayoutSystem {
 }
 
 impl LayoutSystem for MasterStackLayoutSystem {
-    delegate_traditional_layout_system!();
+    delegate_traditional_layout_system!(@without_participation);
+
+    fn window_participates(&self, window: WindowId) -> bool {
+        self.inner.window_participates(window)
+    }
+
+    fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
+        let changed = self.inner.set_window_participation(window, participates);
+        if changed {
+            for layout in self.inner.layouts_for_window(window) {
+                if self.suspended_window_holds_master(layout) {
+                    let (_root, master, stack) = self.ensure_structure(layout);
+                    self.enforce_master_count(layout, master, stack);
+                }
+            }
+        }
+        changed
+    }
 
     fn create_layout(&mut self) -> LayoutId {
         let layout = self.inner.create_layout();
@@ -868,7 +939,15 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.resize_selection_by(layout, amount, orientation);
     }
 
-    fn rebalance(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
+    /// Even out the windows within the master and stack areas, and reset the
+    /// split between them to the master ratio.
+    fn rebalance(&mut self, layout: LayoutId) {
+        self.normalize_layout(layout);
+        let (root, master, stack) = self.ensure_structure(layout);
+        self.inner.rebalance_node(master);
+        self.inner.rebalance_node(stack);
+        self.apply_master_ratio(root, master, stack);
+    }
 
     fn toggle_tile_orientation(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
 }
@@ -879,6 +958,130 @@ mod tests {
     use crate::common::config::{LayoutMode, LayoutSettings};
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    fn frames(system: &MasterStackLayoutSystem, layout: LayoutId) -> Vec<(WindowId, CGRect)> {
+        use objc2_core_foundation::{CGPoint, CGSize};
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 800.0));
+        system.calculate_layout(
+            layout,
+            screen,
+            20.0,
+            &HashMap::default(),
+            &Default::default(),
+            Default::default(),
+        )
+    }
+
+    #[test]
+    fn suspended_master_hands_its_slot_to_a_visible_stack_window() {
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        for idx in 1..=3 {
+            system.add_window_after_selection(layout, w(idx));
+        }
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![
+            w(3),
+            w(2),
+            w(1)
+        ]);
+
+        // Minimizing the master promotes the nearest visible stack window.
+        assert!(system.set_window_participation(w(3), false));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![
+            w(2),
+            w(3),
+            w(1)
+        ]);
+        let projected = frames(&system, layout);
+        let master = projected.iter().find(|(wid, _)| *wid == w(2)).unwrap().1;
+        let stack = projected.iter().find(|(wid, _)| *wid == w(1)).unwrap().1;
+        assert_eq!(master.origin.x, 0.0);
+        assert!((master.size.width - 600.0).abs() < 1.0, "{master:?}");
+        assert!((stack.size.width - 400.0).abs() < 1.0, "{stack:?}");
+        assert_eq!(stack.size.height, 800.0);
+
+        // It returns to the stack slot it was given.
+        assert!(system.set_window_participation(w(3), true));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![
+            w(2),
+            w(3),
+            w(1)
+        ]);
+    }
+
+    #[test]
+    fn suspended_master_skips_suspended_stack_windows() {
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        for idx in 1..=4 {
+            system.add_window_after_selection(layout, w(idx));
+        }
+        // master=[4], stack=[3, 2, 1]
+        assert!(system.set_window_participation(w(3), false));
+        assert!(system.set_window_participation(w(4), false));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![
+            w(2),
+            w(3),
+            w(4),
+            w(1)
+        ]);
+
+        assert!(system.set_window_participation(w(2), false));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![
+            w(1),
+            w(3),
+            w(4),
+            w(2)
+        ]);
+
+        // With nothing visible in the stack, the slot stays put until one returns.
+        assert!(system.set_window_participation(w(1), false));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![
+            w(1),
+            w(3),
+            w(4),
+            w(2)
+        ]);
+        assert!(system.set_window_participation(w(4), true));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![
+            w(4),
+            w(3),
+            w(1),
+            w(2)
+        ]);
+    }
+
+    #[test]
+    fn suspended_master_on_the_right_takes_the_nearest_stack_window() {
+        let mut settings = MasterStackSettings::default();
+        settings.master_side = MasterStackSide::Right;
+        let mut system = MasterStackLayoutSystem::new(settings);
+        let layout = system.create_layout();
+        for idx in 1..=3 {
+            system.add_window_after_selection(layout, w(idx));
+        }
+        let (_root, master, stack) = system.ensure_structure(layout);
+        let master_window = system.windows_in_container(master)[0];
+        let nearest = *system.windows_in_container(stack).last().unwrap();
+        assert!(system.set_window_participation(master_window, false));
+        assert_eq!(system.windows_in_container(master), vec![nearest]);
+    }
+
+    #[test]
+    fn balance_evens_areas_and_restores_master_ratio() {
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        for idx in 1..=3 {
+            system.add_window_after_selection(layout, w(idx));
+        }
+        let before = frames(&system, layout);
+        assert!(system.select_window(layout, w(2)));
+        system.resize_selection_by(layout, 0.2, ResizeOrientation::Horizontal);
+        system.resize_selection_by(layout, 0.2, ResizeOrientation::Vertical);
+        assert_ne!(frames(&system, layout), before);
+        system.rebalance(layout);
+        assert_eq!(frames(&system, layout), before);
+    }
 
     #[test]
     fn test_create_layout() {

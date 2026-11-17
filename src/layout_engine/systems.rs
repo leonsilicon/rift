@@ -349,6 +349,10 @@ macro_rules! delegate_traditional_layout_system {
         fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
             self.inner.set_window_participation(window, participates)
         }
+        delegate_traditional_layout_system!(@tree_membership);
+    };
+    // Everything in `@tree` except participation, for policies that react to it.
+    (@tree_membership) => {
         fn contains_layout(&self, layout: LayoutId) -> bool { self.inner.contains_layout(layout) }
         fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
             self.inner.selected_window(layout)
@@ -398,6 +402,14 @@ macro_rules! delegate_traditional_layout_system {
     };
     () => {
         delegate_traditional_layout_system!(@tree);
+        delegate_traditional_layout_system!(@policy);
+    };
+    // The full delegation minus participation; the policy defines those two itself.
+    (@without_participation) => {
+        delegate_traditional_layout_system!(@tree_membership);
+        delegate_traditional_layout_system!(@policy);
+    };
+    (@policy) => {
         fn remove_layout(&mut self, layout: LayoutId) { self.inner.remove_layout(layout); }
 
 
@@ -751,11 +763,15 @@ mod participation_tests {
             for index in [2, 1, 3] {
                 system.set_window_participation(windows[index], true);
             }
-            assert_eq!(frames(system), original, "{mode}");
-            assert_eq!(
-                windows.iter().map(|&w| system.window_slot(layout, w)).collect::<Vec<_>>(),
-                slots
-            );
+            // Master/stack hands a suspended master's slot to the first visible
+            // stack window, so the master returns to a stack slot instead.
+            if mode != "master_stack" {
+                assert_eq!(frames(system), original, "{mode}");
+                assert_eq!(
+                    windows.iter().map(|&w| system.window_slot(layout, w)).collect::<Vec<_>>(),
+                    slots
+                );
+            }
 
             for &window in &windows {
                 system.set_window_participation(window, false);
@@ -764,17 +780,19 @@ mod participation_tests {
             for &window in windows.iter().rev() {
                 system.set_window_participation(window, true);
             }
-            assert_eq!(
-                windows.iter().map(|&w| system.window_slot(layout, w)).collect::<Vec<_>>(),
-                slots
-            );
+            if mode != "master_stack" {
+                assert_eq!(
+                    windows.iter().map(|&w| system.window_slot(layout, w)).collect::<Vec<_>>(),
+                    slots
+                );
 
-            let returned = frames(system);
-            assert_eq!(
-                returned.iter().map(|(w, frame)| (*w, frame.size)).collect::<Vec<_>>(),
-                original.iter().map(|(w, frame)| (*w, frame.size)).collect::<Vec<_>>(),
-                "{mode}"
-            );
+                let returned = frames(system);
+                assert_eq!(
+                    returned.iter().map(|(w, frame)| (*w, frame.size)).collect::<Vec<_>>(),
+                    original.iter().map(|(w, frame)| (*w, frame.size)).collect::<Vec<_>>(),
+                    "{mode}"
+                );
+            }
 
             system.set_window_participation(windows[1], false);
             assert!(!system.select_window(layout, windows[1]));
